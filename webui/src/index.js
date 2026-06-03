@@ -1,6 +1,346 @@
-import { spawn, exec, toast, getPackagesInfo } from 'kernelsu-alt';
+import { spawn as _spawn, exec as _exec, toast as _toast, getPackagesInfo as _getPackagesInfo } from 'kernelsu-alt';
 import '@material/web/all.js';
 import ReMalwareIcon from './assets/Re-Malware.svg?raw';
+
+// Browser Mock Layer for desktop testing (import.meta.env.DEV)
+let mockFiles = {
+    'config.sh': `adblock_switch=0\ndaily_update=0\ndns_logging=0\naction_mode=0\nblock_porn=0\nblock_gambling=0\nblock_fakenews=0\nblock_social=0\nblock_trackers=0\nblock_safebrowsing=0`,
+    'counts/blocked_mod.count': `235081`,
+    'counts/blocked_sys.count': `235081`,
+    'counts/dns.count': `42`,
+    'counts/blocklists.counts': `porn|120482\ngambling|85002\nfakenews|34021\nsocial|92048\ntrackers|150428\nsafebrowsing|12480`,
+    'blacklist.txt': `example-ad.com\ntest-tracker.org`,
+    'whitelist.txt': `whitelisted-site.com`,
+    'sources.txt': `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt\nhttps://blocklistproject.github.io/Lists/ads.txt`,
+    'custom_rules.txt': `192.168.1.1 router.local\n0.0.0.0 local-ad.com`,
+    'logs/dns.log': `[10:14:02] - [BLOCKED] - doubleclick.net - com.android.chrome\n[10:14:05] - [ALLOWED] - google.com - com.android.chrome\n[10:14:09] - [BLOCKED] - ads.facebook.com - com.facebook.katana\n[10:14:12] - [BLOCKED] - telemetry.reddit.com - com.reddit.frontpage\n[10:14:15] - [ALLOWED] - github.com - com.github.android`,
+};
+
+if (import.meta.env.DEV) {
+    const originalFetch = window.fetch;
+    window.fetch = function(url, options) {
+        if (typeof url === 'string' && url.includes('link/persistent_dir/')) {
+            const fileName = url.split('link/persistent_dir/')[1].split('?')[0];
+            const content = mockFiles[fileName] !== undefined ? mockFiles[fileName] : '';
+            return Promise.resolve(new Response(content, {
+                status: 200,
+                headers: { 'Content-Type': 'text/plain' }
+            }));
+        }
+        return originalFetch(url, options);
+    };
+}
+
+// Mock exec and spawn
+function mockExec(cmd) {
+    console.log('[MOCK EXEC]:', cmd);
+    const cleaned = cmd.trim();
+
+    if (cleaned.startsWith('grep \'^version=\'')) {
+        return Promise.resolve({ errno: 0, stdout: 'v7.0-test (70001-mockdev)', stderr: '' });
+    }
+    if (cleaned.startsWith('for p in') && cleaned.includes('/profiles/*.txt')) {
+        return Promise.resolve({
+            errno: 0,
+            stdout: 'default|Default Adblock profile|builtin|false\naggressive|Aggressive blocking|builtin|false\nbalanced|Balanced blocking|builtin|false\nlite|Lite blocking|builtin|false',
+            stderr: ''
+        });
+    }
+    if (cleaned.includes("grep") && cleaned.includes("profile=")) {
+        return Promise.resolve({ errno: 0, stdout: 'default', stderr: '' });
+    }
+    if (cleaned.includes('hostsredirect')) {
+        return Promise.resolve({ errno: 1, stdout: '', stderr: 'znhr not installed' });
+    }
+    if (cleaned.startsWith('system_hosts=')) {
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+    if (cleaned.includes('hosts.bak') && cleaned.includes('adblock_switch=1')) {
+        const hasBak = mockFiles['hosts.bak'] !== undefined;
+        const config = mockFiles['config.sh'] || '';
+        const isSwitchOn = config.includes('adblock_switch=1');
+        return Promise.resolve({ errno: (hasBak && isSwitchOn) ? 0 : 1, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('cat') && cleaned.includes('blocked_mod.count')) {
+        return Promise.resolve({ errno: 0, stdout: mockFiles['counts/blocked_mod.count'] || '0', stderr: '' });
+    }
+    if (cleaned.includes('mode_ready')) {
+        const exists = mockFiles['mode_ready'] !== undefined;
+        return Promise.resolve({ errno: exists ? 0 : 1, stdout: '', stderr: '' });
+    }
+    if (cleaned.includes('first_install_flag')) {
+        return Promise.resolve({ errno: 1, stdout: '', stderr: '' });
+    }
+    if (cleaned.includes('reboot_required')) {
+        const exists = mockFiles['reboot_required'] !== undefined;
+        return Promise.resolve({ errno: exists ? 0 : 1, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('date -r')) {
+        return Promise.resolve({ errno: 0, stdout: '12 03/06/2026', stderr: '' });
+    }
+    if (cleaned.startsWith('date +')) {
+        const now = new Date();
+        const formatted = `${String(now.getHours()).padStart(2, '0')} ${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+        return Promise.resolve({ errno: 0, stdout: formatted, stderr: '' });
+    }
+    if (cleaned.includes('action_mode=')) {
+        const config = mockFiles['config.sh'] || '';
+        const match = config.match(/action_mode=(\d+)/);
+        const mode = match ? match[1] : '0';
+        return Promise.resolve({ errno: 0, stdout: mode, stderr: '' });
+    }
+    if (cleaned.startsWith('sed -i') && cleaned.includes('action_mode=')) {
+        const match = cleaned.match(/action_mode=(\d+)/);
+        if (match) {
+            let config = mockFiles['config.sh'] || '';
+            config = config.replace(/action_mode=\d+/, `action_mode=${match[1]}`);
+            mockFiles['config.sh'] = config;
+        }
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('sed -i') && cleaned.includes('daily_update=')) {
+        const match = cleaned.match(/daily_update=(\d+)/);
+        if (match) {
+            let config = mockFiles['config.sh'] || '';
+            config = config.replace(/daily_update=\d+/, `daily_update=${match[1]}`);
+            mockFiles['config.sh'] = config;
+        }
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('cat') && cleaned.includes('dns.count')) {
+        return Promise.resolve({ errno: 0, stdout: mockFiles['counts/dns.count'] || '0', stderr: '' });
+    }
+    if (cleaned.startsWith('>') && cleaned.includes('dns.log')) {
+        mockFiles['logs/dns.log'] = '';
+        mockFiles['counts/dns.count'] = '0';
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('echo "0"') && cleaned.includes('dns.count')) {
+        mockFiles['counts/dns.count'] = '0';
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+    if (cleaned.startsWith('ls -Ap')) {
+        const out = 'Download/\nDocuments/\nPictures/\nRe-Malwack-settings_backup.tar.gz\n';
+        return Promise.resolve({ errno: 0, stdout: out, stderr: '' });
+    }
+    if (cleaned.includes('tar -czf') || cleaned.includes('tar -xzf') || cleaned.startsWith('mkdir -p') || cleaned.startsWith('rm -f') || cleaned.includes('[ -L')) {
+        return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+    }
+
+    return Promise.resolve({ errno: 0, stdout: '', stderr: '' });
+}
+
+function mockSpawn(cmd, args) {
+    console.log('[MOCK SPAWN]:', cmd, args);
+    const subCmd = args[1] || '';
+    const action = args[2] || '';
+
+    const listeners = { exit: [], stdout: [], stderr: [] };
+    const stdoutStream = {
+        emit(event, data) {
+            if (event === 'data' && listeners.stdout) {
+                listeners.stdout.forEach(cb => cb(data));
+            }
+        },
+        on(event, cb) {
+            if (event === 'data') listeners.stdout.push(cb);
+        }
+    };
+    const stderrStream = {
+        emit(event, data) {
+            if (event === 'data' && listeners.stderr) {
+                listeners.stderr.forEach(cb => cb(data));
+            }
+        },
+        on(event, cb) {
+            if (event === 'data') listeners.stderr.push(cb);
+        }
+    };
+
+    const runner = {
+        stdout: stdoutStream,
+        stderr: stderrStream,
+        on(event, cb) {
+            if (listeners[event]) listeners[event].push(cb);
+        },
+        emit(event, ...data) {
+            if (listeners[event]) listeners[event].forEach(cb => cb(...data));
+        }
+    };
+
+    setTimeout(async () => {
+        if (subCmd === '--update-hosts') {
+            stdoutStream.emit('data', '[*] Upgrading Anti-Ads fortress 🏰\n');
+            await new Promise(r => setTimeout(r, 600));
+            stdoutStream.emit('data', '[*] Fetching base hosts...\n');
+            await new Promise(r => setTimeout(r, 800));
+            stdoutStream.emit('data', '[✓] Fetched base hosts\n');
+            await new Promise(r => setTimeout(r, 600));
+            stdoutStream.emit('data', '[*] Installing hosts\n');
+            await new Promise(r => setTimeout(r, 800));
+            stdoutStream.emit('data', '[✓] Everything is now Good!\n');
+            runner.emit('exit', 0);
+        } else if (subCmd === '--reset') {
+            stdoutStream.emit('data', '[*] Reverting the changes...\n');
+            await new Promise(r => setTimeout(r, 800));
+            stdoutStream.emit('data', '[✓] Successfully reverted hosts.\n');
+            mockFiles['counts/blocked_mod.count'] = '0';
+            let config = mockFiles['config.sh'] || '';
+            config = config.replace(/block_(\w+)=1/g, 'block_$1=0');
+            mockFiles['config.sh'] = config;
+            runner.emit('exit', 0);
+        } else if (subCmd.startsWith('--block-')) {
+            const blockType = subCmd.replace('--block-', '');
+            const enable = action !== '0';
+            stdoutStream.emit('data', `[*] ${enable ? 'Enabling' : 'Disabling'} block entries for ${blockType}...\n`);
+            await new Promise(r => setTimeout(r, 800));
+            stdoutStream.emit('data', `[✓] ${enable ? 'Enabled' : 'Disabled'} ${blockType} blocklist successfully.\n`);
+            let config = mockFiles['config.sh'] || '';
+            const regex = new RegExp(`block_${blockType}=\\d`);
+            config = config.replace(regex, `block_${blockType}=${enable ? '1' : '0'}`);
+            mockFiles['config.sh'] = config;
+            
+            // update counts
+            let currentCount = parseInt(mockFiles['counts/blocked_mod.count']) || 0;
+            if (enable) {
+                currentCount += 50000;
+            } else {
+                currentCount = Math.max(0, currentCount - 50000);
+            }
+            mockFiles['counts/blocked_mod.count'] = String(currentCount);
+
+            runner.emit('exit', 0);
+        } else if (subCmd === '--whitelist') {
+            const domain = args[args.length - 1];
+            if (action === 'add') {
+                stdoutStream.emit('data', `[*] Whitelisting (exact): ${domain}\n`);
+                await new Promise(r => setTimeout(r, 600));
+                stdoutStream.emit('data', `[✓] Whitelisted (exact): ${domain}\n`);
+                let wl = mockFiles['whitelist.txt'] || '';
+                wl = wl.trim() + `\n${domain}`;
+                mockFiles['whitelist.txt'] = wl.trim();
+            } else {
+                stdoutStream.emit('data', `[*] Removing from whitelist: ${domain}\n`);
+                await new Promise(r => setTimeout(r, 600));
+                stdoutStream.emit('data', `[✓] Removed from whitelist: ${domain}\n`);
+                let wl = mockFiles['whitelist.txt'] || '';
+                wl = wl.split('\n').filter(d => d !== domain).join('\n');
+                mockFiles['whitelist.txt'] = wl;
+            }
+            runner.emit('exit', 0);
+        } else if (subCmd === '--blacklist') {
+            const domain = args[args.length - 1];
+            if (action === 'add') {
+                stdoutStream.emit('data', `[*] Blacklisting ${domain}...\n`);
+                await new Promise(r => setTimeout(r, 600));
+                stdoutStream.emit('data', `[✓] Blacklisted ${domain}.\n`);
+                let bl = mockFiles['blacklist.txt'] || '';
+                bl = bl.trim() + `\n${domain}`;
+                mockFiles['blacklist.txt'] = bl.trim();
+            } else {
+                stdoutStream.emit('data', `[*] Removing ${domain} from blacklist...\n`);
+                await new Promise(r => setTimeout(r, 600));
+                stdoutStream.emit('data', `[✓] ${domain} has been removed from blacklist.\n`);
+                let bl = mockFiles['blacklist.txt'] || '';
+                bl = bl.split('\n').filter(d => d !== domain).join('\n');
+                mockFiles['blacklist.txt'] = bl;
+            }
+            runner.emit('exit', 0);
+        } else if (subCmd === '--custom-source') {
+            const domain = args[args.length - 1];
+            if (action === 'add') {
+                stdoutStream.emit('data', `[✓] Added ${domain} to sources.\n`);
+                let src = mockFiles['sources.txt'] || '';
+                src = src.trim() + `\n${domain}`;
+                mockFiles['sources.txt'] = src.trim();
+            } else {
+                stdoutStream.emit('data', `[✓] Removed ${domain} from sources.\n`);
+                let src = mockFiles['sources.txt'] || '';
+                src = src.split('\n').filter(d => d !== domain).join('\n');
+                mockFiles['sources.txt'] = src;
+            }
+            runner.emit('exit', 0);
+        } else if (subCmd === '--custom-rule') {
+            const ip = args[3];
+            const domain = args[4];
+            if (action === 'add') {
+                stdoutStream.emit('data', `[✓] Added rule: ${ip} ${domain}\n`);
+                let cr = mockFiles['custom_rules.txt'] || '';
+                cr = cr.trim() + `\n${ip} ${domain}`;
+                mockFiles['custom_rules.txt'] = cr.trim();
+            } else {
+                stdoutStream.emit('data', `[✓] Removed rule: ${ip} ${domain}\n`);
+                let cr = mockFiles['custom_rules.txt'] || '';
+                cr = cr.split('\n').filter(line => !line.includes(`${ip} ${domain}`)).join('\n');
+                mockFiles['custom_rules.txt'] = cr;
+            }
+            runner.emit('exit', 0);
+        } else if (subCmd === '--auto-update') {
+            const enable = action === 'enable';
+            let config = mockFiles['config.sh'] || '';
+            config = config.replace(/daily_update=\d/, `daily_update=${enable ? '1' : '0'}`);
+            mockFiles['config.sh'] = config;
+            runner.emit('exit', 0);
+        } else if (subCmd === '--dns-logging') {
+            const enable = action === 'enable';
+            let config = mockFiles['config.sh'] || '';
+            config = config.replace(/dns_logging=\d/, `dns_logging=${enable ? '1' : '0'}`);
+            mockFiles['config.sh'] = config;
+            mockFiles['reboot_required'] = ''; // touch reboot required
+            runner.emit('exit', 0);
+        } else if (subCmd === '--adblock-switch') {
+            const config = mockFiles['config.sh'] || '';
+            const isPaused = config.includes('adblock_switch=1');
+            let newConfig = config;
+            if (isPaused) {
+                newConfig = newConfig.replace(/adblock_switch=1/, 'adblock_switch=0');
+                delete mockFiles['hosts.bak'];
+            } else {
+                newConfig = newConfig.replace(/adblock_switch=0/, 'adblock_switch=1');
+                mockFiles['hosts.bak'] = 'hosts backup file';
+            }
+            mockFiles['config.sh'] = newConfig;
+            runner.emit('exit', 0);
+        } else {
+            runner.emit('exit', 0);
+        }
+    }, 10);
+
+    return runner;
+}
+
+const exec = (cmd, opts) => {
+    if (import.meta.env.DEV) {
+        return mockExec(cmd, opts);
+    }
+    return _exec(cmd, opts);
+};
+
+const spawn = (cmd, args, opts) => {
+    if (import.meta.env.DEV) {
+        return mockSpawn(cmd, args, opts);
+    }
+    return _spawn(cmd, args, opts);
+};
+
+const toast = (msg) => {
+    if (import.meta.env.DEV) {
+        showPrompt(msg, true);
+        return;
+    }
+    return _toast(msg);
+};
+
+const getPackagesInfo = (packages) => {
+    if (import.meta.env.DEV) {
+        return Promise.resolve(packages.map(pkg => ({
+            package: pkg,
+            label: pkg.split('.').pop(),
+            icon: ''
+        })));
+    }
+    return _getPackagesInfo(packages);
+};
 
 const basePath = "/data/adb/Re-Malwack";
 const modulePath = "/data/adb/modules/Re-Malwack";
@@ -36,16 +376,7 @@ const links = [
     { element: 'sponsor', url: 'https://buymeacoffee.com/zg089' }
 ];
 
-let initAboutMenu = false;
-// Function to handle about menu
-function aboutMenu() {
-    const aboutOverlay = document.getElementById('about-dialog');
-    if (!initAboutMenu) {
-        initCredit();
-        initAboutMenu = true;
-    }
-    aboutOverlay.show();
-}
+
 
 // Get module version from module.prop
 async function getVersion() {
@@ -65,12 +396,16 @@ async function getVersion() {
             displayHash = testMatch[2] || '';
         } else {
             versionMain.textContent = rawVersion || 'Unknown';
+            const settingsVersion = document.getElementById('version-text-settings');
+            if (settingsVersion) settingsVersion.textContent = rawVersion || 'Unknown';
             return;
         }
     } else if (import.meta.env.DEV) {
         versionMain.textContent = "DEV";
         displayHash = "DEVELOPMENT STAGE";
     }
+    const settingsVersion = document.getElementById('version-text-settings');
+    if (settingsVersion) settingsVersion.textContent = versionMain.textContent;
     versionText.textContent = `Click to copy test build ID: ${displayHash}`;
     versionBox.classList.add('display-flex');
 
@@ -435,6 +770,9 @@ function performAction(commandOption, showTerminal = true) {
         terminal.classList.remove('show');
         closeBtn.classList.remove('show');
         backBtn.style.display = '';
+        if (floatBtn) {
+            floatBtn.classList.add('show');
+        }
         setTimeout(() => {
             terminalContent.innerHTML = "";
         }, 400); // Wait for the transition to finish
@@ -487,6 +825,9 @@ function performAction(commandOption, showTerminal = true) {
     if (showTerminal) {
         terminal.classList.add('show');
         document.body.classList.add('noscroll');
+        if (floatBtn) {
+            floatBtn.classList.remove('show');
+        }
         if (commandOption === "--update-hosts") {
             backBtn.style.display = 'none';
         } else {
@@ -1629,54 +1970,81 @@ async function loadTheme(themeName) {
  */
 async function setupTheme() {
     const themeAnchor = document.getElementById('theme-toggle');
-    const themeSelect = document.getElementById('theme-select');
+    const themeDialog = document.getElementById('theme-dialog');
+    const themeListContainer = document.getElementById('theme-list-container');
+    const cancelThemeBtn = document.getElementById('cancel-theme-dialog');
 
-    themeAnchor.onclick = (e) => {
-        e.stopImmediatePropagation();
-        themeSelect.open = !themeSelect.open
-    }
+    // Open dialog
+    themeAnchor.onclick = () => {
+        themeDialog.show();
+    };
+
+    // Cancel button
+    cancelThemeBtn.onclick = () => {
+        themeDialog.close();
+    };
+
     try {
         if (!cachedThemeData) {
             const response = await fetch('theme.json');
             cachedThemeData = await response.json();
         }
 
-        // Clear and populate theme-select
-        themeSelect.innerHTML = '';
-
         const options = [...Object.keys(cachedThemeData.schemes), 'system'];
         const savedTheme = localStorage.getItem('remalwack_theme') || 'system';
+        let selectedTheme = savedTheme;
 
-        options.forEach(key => {
-            const option = document.createElement('md-menu-item');
-            if (key === savedTheme) option.setAttribute('selected', '');
-            option.innerHTML = `
-                <div slot="headline">${key.charAt(0).toUpperCase() + key.slice(1)}</div>
-            `;
-            option.onclick = (e) => {
-                e.stopImmediatePropagation();
-                themeSelect.querySelectorAll('md-menu-item').forEach(item => {
-                    item.removeAttribute('selected');
-                });
-                option.setAttribute('selected', '');
-                setNewTheme(key);
-            }
-            themeSelect.appendChild(option);
-        });
-
-        await loadTheme(savedTheme);
-
-        const setNewTheme = async (themeName) => {
+        const setNewTheme = (themeName) => {
             if (themeName === 'system') {
                 localStorage.removeItem('remalwack_theme');
             } else {
                 localStorage.setItem('remalwack_theme', themeName);
             }
-            await loadTheme(themeName);
-        }
+            loadTheme(themeName);
+        };
+
+        // Build theme list
+        themeListContainer.innerHTML = '';
+        options.forEach(key => {
+            const displayName = key.charAt(0).toUpperCase() + key.slice(1);
+            const isSelected = key === savedTheme;
+
+            const item = document.createElement('div');
+            item.style.cssText = 'display:flex; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid var(--md-sys-color-outline-variant); cursor:pointer;';
+
+            const radio = document.createElement('md-radio');
+            radio.name = 'theme-selection';
+            radio.value = key;
+            radio.checked = isSelected;
+            radio.style.flexShrink = '0';
+
+            const label = document.createElement('span');
+            label.textContent = displayName;
+            label.style.cssText = 'font-weight:500; font-size:1rem; color:var(--md-sys-color-on-surface);';
+
+            item.appendChild(radio);
+            item.appendChild(label);
+
+            // Click on the row to select
+            const selectThis = () => {
+                selectedTheme = key;
+                themeListContainer.querySelectorAll('md-radio').forEach(r => { r.checked = false; });
+                radio.checked = true;
+                setNewTheme(key);
+                themeDialog.close();
+            };
+
+            item.onclick = selectThis;
+            radio.onclick = selectThis;
+
+            themeListContainer.appendChild(item);
+        });
+
+        await loadTheme(savedTheme);
 
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-            if (themeSelect.value === 'system') {
+            const currentTheme = localStorage.getItem('remalwack_theme') || 'system';
+            if (currentTheme === 'system') {
                 loadTheme('system');
             }
         });
@@ -2144,11 +2512,16 @@ function setupProfile() {
 
 // update adblock swtich
 async function updateAdblockSwtich() {
-    const play = document.getElementById('play-icon');
-    const pause = document.getElementById('pause-icon');
+    const sw = document.getElementById('adblock-switch');
+    const toggleIcon = document.getElementById('adblock-toggle-icon');
     const protection = await isPaused();
-    play.classList.toggle('display-block', protection);
-    pause.classList.toggle('display-block', !protection);
+    
+    if (sw) {
+        sw.selected = !protection;
+    }
+    if (toggleIcon) {
+        toggleIcon.textContent = protection ? 'gpp_bad' : 'security';
+    }
 }
 
 function initCredit() {
@@ -2160,10 +2533,12 @@ function initCredit() {
                 const creditBox = document.createElement('div');
                 creditBox.className = 'credit-box';
                 creditBox.innerHTML = `
-                    <img src="https://github.com/${contributor.username}.png" alt="${contributor.username}">
-                    <h3>${contributor.username}</h3>
-                    <h4>${contributor.type}</h4>
-                    <p>${contributor.description}</p>
+                    <img src="https://github.com/${contributor.username}.png" alt="${contributor.username}" class="credit-img">
+                    <div class="credit-info">
+                        <h3>${contributor.username}</h3>
+                        <h4>${contributor.type}</h4>
+                        <p>${contributor.description}</p>
+                    </div>
                     <md-ripple></md-ripple>
                 `;
                 credit.appendChild(creditBox);
@@ -2198,9 +2573,9 @@ window.addEventListener('scroll', () => {
         });
     }
     if (window.scrollY > lastScrollY && window.scrollY > scrollThreshold) {
-        floatBtn.classList.remove('show');
+        if (floatBtn) floatBtn.classList.remove('show');
     } else if (window.scrollY < lastScrollY) {
-        floatBtn.classList.add('show');
+        if (floatBtn) floatBtn.classList.add('show');
     }
     lastScrollY = window.scrollY;
 });
@@ -2254,7 +2629,7 @@ function setupEventListener() {
         });
     }
 
-    document.getElementById("info-box").addEventListener("click", aboutMenu);
+    initCredit();
     document.getElementById("update").addEventListener("click", () => performAction("--update-hosts"));
     document.getElementById("daily-update-toggle").addEventListener("change", toggleDailyUpdate);
     document.getElementById("reset").addEventListener("click", resetHostsFile);
@@ -2287,15 +2662,19 @@ function setupEventListener() {
     });
 
     // Adblock switch
-    document.getElementById('adblock-switch').addEventListener("click", async () => {
-        const result = await performAction('--adblock-switch', false);
-        if (result) {
-            const paused = await isPaused();
-            showPrompt(paused ? "Protection has been paused." : "Protection has been resumed.");
-        } else {
-            showPrompt("Failed to toggle protection", false);
-        }
-    });
+    const adblockToggleItem = document.getElementById('adblock-toggle-item');
+    if (adblockToggleItem) {
+        adblockToggleItem.addEventListener("click", async () => {
+            const result = await performAction('--adblock-switch', false);
+            if (result) {
+                const paused = await isPaused();
+                showPrompt(paused ? "Protection has been paused." : "Protection has been resumed.");
+                updateAdblockSwtich(); // Update UI immediately
+            } else {
+                showPrompt("Failed to toggle protection", false);
+            }
+        });
+    }
 
     // Add button
     document.getElementById("whitelist-input").addEventListener("keypress", (e) => {
@@ -2359,7 +2738,7 @@ function setupEventListener() {
     if (dnsBtnDomain && dnsBtnApp) {
         dnsBtnDomain.addEventListener('click', () => {
             if (dnsViewMode === 'domain') return;
-            const tbBack = document.getElementById('dns-tb-back');
+            const tbBack = document.getElementById('g-tb-close');
             if (tbBack) tbBack.click();
             dnsViewMode = 'domain';
             dnsUpdateToggle();
@@ -2367,7 +2746,7 @@ function setupEventListener() {
         });
         dnsBtnApp.addEventListener('click', () => {
             if (dnsViewMode === 'app') return;
-            const tbBack = document.getElementById('dns-tb-back');
+            const tbBack = document.getElementById('g-tb-close');
             if (tbBack) tbBack.click();
             dnsViewMode = 'app';
             dnsUpdateToggle();
@@ -2417,6 +2796,164 @@ async function checkRebootRequired() {
     await updateDnsSubmenuState();
 }
 
+function setupTabs() {
+    const tabs = ["dashboard", "filters", "rules", "logs", "settings"];
+    const navItems = document.querySelectorAll(".bottom-nav .nav-item");
+    const tabContents = document.querySelectorAll(".tab-container .tab-content");
+
+    // Load active tab from localStorage or default to dashboard
+    let activeTab = localStorage.getItem("active_tab") || "dashboard";
+    if (!tabs.includes(activeTab)) {
+        activeTab = "dashboard";
+    }
+
+    // Update central title instantly
+    const updateNavTitle = (tabId) => {
+        const titleEl = document.getElementById('nav-active-title');
+        const activeItem = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
+        
+        if (titleEl && activeItem) {
+            titleEl.textContent = activeItem.getAttribute('data-name');
+        }
+    };
+
+    // Update sliding nav indicator
+    const updateNavIndicator = () => {
+        const activeItem = document.querySelector('.nav-item.active');
+        const indicator = document.querySelector('.nav-indicator');
+        if (activeItem && indicator) {
+            // Match the exact width and position of the full nav-item column
+            indicator.style.left = `${activeItem.offsetLeft}px`;
+            indicator.style.width = `${activeItem.offsetWidth}px`;
+        }
+    };
+
+    // Function to switch to a specific tab
+    const switchTab = (tabId, direction = null, pushHistory = true) => {
+        const prevIndex = tabs.indexOf(localStorage.getItem("active_tab") || "dashboard");
+        const newIndex = tabs.indexOf(tabId);
+
+        // Update active class in navItems
+        navItems.forEach(item => {
+            if (item.getAttribute("data-tab") === tabId) {
+                item.classList.add("active");
+            } else {
+                item.classList.remove("active");
+            }
+        });
+        
+        updateNavTitle(tabId);
+        setTimeout(updateNavIndicator, 10);
+
+        // Update active class in tabContents and handle transition animation
+        tabContents.forEach(content => {
+            const currentTabId = content.id.replace("tab-", "");
+            if (currentTabId === tabId) {
+                content.classList.add("active");
+                content.classList.remove("slide-left", "slide-right");
+                if (direction === "forward") {
+                    content.classList.add("slide-right");
+                } else if (direction === "backward") {
+                    content.classList.add("slide-left");
+                }
+            } else {
+                content.classList.remove("active", "slide-left", "slide-right");
+            }
+        });
+
+        // Save active tab
+        localStorage.setItem("active_tab", tabId);
+
+        // Push history state for back gesture support
+        if (pushHistory) {
+            if (tabId === 'dashboard') {
+                history.replaceState({ tab: 'dashboard' }, '', '#dashboard');
+            } else {
+                const currentTab = localStorage.getItem("active_tab") || "dashboard";
+                if (currentTab === 'dashboard') {
+                    history.pushState({ tab: tabId }, '', '#' + tabId);
+                } else {
+                    history.replaceState({ tab: tabId }, '', '#' + tabId);
+                }
+            }
+        }
+
+        // Scroll to top on tab switch
+        window.scrollTo(0, 0);
+    };
+
+    // Listen to resize events to reposition the indicator
+    window.addEventListener('resize', () => {
+        setTimeout(updateNavIndicator, 50);
+    });
+
+    // Handle browser/device back gesture
+    window.addEventListener('popstate', (event) => {
+        let overlayClosed = false;
+
+        // Close any open md-dialogs
+        const openDialogs = document.querySelectorAll('md-dialog[open]');
+        if (openDialogs.length > 0) {
+            openDialogs.forEach(dialog => dialog.close());
+            overlayClosed = true;
+        }
+
+        // Close terminal if it's open
+        const terminal = document.querySelector('.terminal');
+        if (terminal && terminal.classList.contains('show')) {
+            const closeBtn = document.querySelector('.close-terminal');
+            if (closeBtn) closeBtn.click();
+            overlayClosed = true;
+        }
+
+        // Close regular overlays if they are open
+        const overlay = document.querySelector('.overlay');
+        if (overlay && overlay.classList.contains('show')) {
+            overlay.classList.remove('show');
+            overlayClosed = true;
+        }
+
+        if (overlayClosed) {
+            // A dialog/overlay was open. We just closed it.
+            // Push the current tab state back to history to undo the pop!
+            history.pushState({ tab: activeTab }, '', '#' + activeTab);
+            return; // Do not switch tabs
+        }
+
+        if (event.state && event.state.tab) {
+            switchTab(event.state.tab, 'backward', false);
+        } else {
+            // Default to dashboard on back if state is missing or we navigated back to root
+            switchTab('dashboard', 'backward', false);
+        }
+    });
+
+    // Initialize with history state
+    history.replaceState({ tab: activeTab }, '', '#' + activeTab);
+
+    // Initialize initial tab without pushing history
+    switchTab(activeTab, null, false);
+
+    // Bind click events
+    navItems.forEach(item => {
+        item.addEventListener("click", () => {
+            const targetTab = item.getAttribute("data-tab");
+            const currentTab = localStorage.getItem("active_tab") || "dashboard";
+            if (targetTab === currentTab) return;
+
+            const currentIndex = tabs.indexOf(currentTab);
+            const targetIndex = tabs.indexOf(targetTab);
+            
+            // If toolbar is open, close it
+            const tbBack = document.getElementById('g-tb-close');
+            if (tbBack) tbBack.click();
+
+            const direction = targetIndex > currentIndex ? "forward" : "backward";
+            switchTab(targetTab, direction);
+        });
+    });
+}
+
 // Initial load
 document.addEventListener('DOMContentLoaded', async () => {
     await Promise.all([setupTheme()]);
@@ -2431,22 +2968,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     checkMount();
     loadActionMode();
     updateAdblockSwtich();
-    floatBtn.classList.add('show');
+    if (floatBtn) {
+        floatBtn.classList.add('show');
+    }
     checkRebootRequired();
     await checkBlockStatus();
     ["custom-source", "custom-rule", "blacklist", "whitelist"].forEach(loadFile);
     loadDnsLogs();
+    setupTabs();
 
     // Bind listeners since setupEventListener is likely hoisted
     document.getElementById('dns-logging-toggle').addEventListener('change', toggleDnsLogging);
     document.getElementById('refresh-dns-logs').addEventListener('click', () => {
-        const tbBack = document.getElementById('dns-tb-back');
+        const tbBack = document.getElementById('g-tb-close');
         if (tbBack) tbBack.click();
         loadDnsLogs();
         showPrompt("DNS Logs refreshed", true);
     });
     document.getElementById('clear-dns-logs').addEventListener('click', async () => {
-        const tbBack = document.getElementById('dns-tb-back');
+        const tbBack = document.getElementById('g-tb-close');
         if (tbBack) tbBack.click();
         await exec(`> ${basePath}/logs/dns.log`);
         showPrompt("DNS Logs cleared", true);

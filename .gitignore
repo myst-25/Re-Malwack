@@ -3,3 +3,5 @@
 
 # webui debug
 /module/webroot
+*.zip
+output/
